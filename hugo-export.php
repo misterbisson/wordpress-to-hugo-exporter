@@ -174,9 +174,8 @@ class Hugo_Export
         $wp_slug = html_entity_decode( urldecode( $post->post_name ), ENT_QUOTES, 'UTF-8' );
         if ( $this->meta['slug'] != $wp_slug )
         {
-            $this->meta['aliases'] = $wp_url = str_replace( $wp_slug, $this->meta['slug'], $wp_url );
+            $this->meta['aliases'][] = $wp_url = str_replace( $wp_slug, $this->meta['slug'], $wp_url );
         }
-        $this->meta['aliases'][] = $wp_url;
 
         // sort and uniq the aliases,
         // because we'll be looking at them every time we edit the post, and it'll look better
@@ -193,6 +192,7 @@ class Hugo_Export
             'slug' => html_entity_decode( urldecode( $post->post_name ), ENT_QUOTES, 'UTF-8' ),
             'guid' => html_entity_decode( urldecode( $post->guid ), ENT_QUOTES, 'UTF-8' ),
             'url' => html_entity_decode( urldecode( get_permalink( $post )), ENT_QUOTES, 'UTF-8' ),
+            'last_modified' => date('c', strtotime( $post->post_modified_gmt )),
         );
 
         if ( $post->post_status == 'private' )
@@ -502,11 +502,15 @@ class Hugo_Export
     /**
      * Convert the main post content to Markdown.
      */
-    function convert_content($post)
+    function convert_content( $post )
     {
 
         $content = apply_filters( 'the_content', $post->post_content );
         $content = html_entity_decode( $content, ENT_QUOTES | ENT_XML1, 'UTF-8');
+
+        // save the post HTML separately,
+        // because the conversion to markdown can go horribly wrong sometimes...
+        $this->write( $content, $dirpath . 'original-content.html' );
 
         // additional filters
         // remove bSuite/bCMS innerindex blocks
@@ -636,6 +640,8 @@ class Hugo_Export
 
             // write progress to the CLI
             fwrite(STDOUT, '.' );
+
+            sleep( 2 );
         }
     }
 
