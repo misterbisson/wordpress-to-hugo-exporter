@@ -28,7 +28,7 @@ class Hugo_Export
 {
     protected $_tempDir = null;
     private $zip_folder = 'hugo-export/'; //folder zip file extracts to
-    private $post_folder = 'posts/'; //folder to place posts within
+    private $post_folder = 'post/'; //folder to place posts within
 
     /**
      * Manually edit this private property and set it to TRUE if you want to export
@@ -132,6 +132,7 @@ class Hugo_Export
     function convert_meta( WP_Post $post )
     {
         $this->meta['title'] = html_entity_decode( get_the_title( $post ), ENT_QUOTES | ENT_XML1, 'UTF-8' );
+        $this->meta['slug'] = $this->translit( html_entity_decode( urldecode( $post->post_name ), ENT_QUOTES, 'UTF-8' ));
         $this->meta['author'] = get_userdata($post->post_author)->display_name;
         $this->meta['type'] = get_post_type($post);
         $this->meta['date'] = $this->_getPostDateAsIso($post);
@@ -144,13 +145,10 @@ class Hugo_Export
             $this->meta['draft'] = true;
         }
 
-        // Ideally we'd set Hugo permalinks to match WordPress for consistent links
-        // but https://github.com/gohugoio/hugo/issues/4870 requires we set an explicit URL
-        $this->meta['url'] = html_entity_decode( urldecode( str_replace( home_url(), '', get_permalink( $post ))), ENT_QUOTES, 'UTF-8' );
-
         // add URL aliases for the content
         // https://gohugo.io/content-management/urls/
-        $old_url_base = dirname( $this->meta['url'] );
+        $wp_url = html_entity_decode( urldecode( str_replace( home_url(), '', get_permalink( $post ))), ENT_QUOTES, 'UTF-8' );
+        $wp_url_base = dirname( $wp_url );
         foreach ( get_post_meta( $post->ID, '_wp_old_slug' ) as $old_slug )
         {
             if ( empty( $old_slug ) )
@@ -158,40 +156,50 @@ class Hugo_Export
                 continue;
             }
 
-            $this->meta['aliases'][] = $old_url_base . '/' . urldecode( $old_slug );
-            $this->meta['aliases'][] = $old_url_base . '/' . html_entity_decode( urldecode( $old_slug ), ENT_QUOTES, 'UTF-8' );
-            $this->meta['aliases'][] = $old_url_base . '/' . $this->translit( html_entity_decode( urldecode( $old_slug ), ENT_QUOTES, 'UTF-8' ));
+            $this->meta['aliases'][] = $wp_url_base . '/' . urldecode( $old_slug );
+            $this->meta['aliases'][] = $wp_url_base . '/' . html_entity_decode( urldecode( $old_slug ), ENT_QUOTES, 'UTF-8' );
+            $this->meta['aliases'][] = $wp_url_base . '/' . $this->translit( html_entity_decode( urldecode( $old_slug ), ENT_QUOTES, 'UTF-8' ));
         }
 
         // appropriate for some permalink patterns
         // enable/disable as needed
-        if ( '/' != $old_url_base )
+        if ( '/' != $wp_url_base )
         {
-            $this->meta['aliases'][] = $old_url_base;
+            $this->meta['aliases'][] = $wp_url_base;
         }
 
         // check if the old WP slug had non-ascii chars
         // this makes assumptions about URL structure that might not work for everybody
+        $this->meta['aliases'][] = $wp_url;
         $wp_slug = html_entity_decode( urldecode( $post->post_name ), ENT_QUOTES, 'UTF-8' );
-        $sanized_slug = $this->translit( html_entity_decode( urldecode( $post->post_name ), ENT_QUOTES, 'UTF-8' ));
-        if ( $sanized_slug != $wp_slug )
+        if ( $this->meta['slug'] != $wp_slug )
         {
-            $this->meta['aliases'][] = $this->meta['url'];
-            $this->meta['url'] = str_replace( $wp_slug, $sanized_slug, $this->meta['url'] );
+            $this->meta['aliases'] = $wp_url = str_replace( $wp_slug, $this->meta['slug'], $wp_url );
         }
+        $this->meta['aliases'][] = $wp_url;
+
+        // sort and uniq the aliases,
+        // because we'll be looking at them every time we edit the post, and it'll look better
+        $this->meta['aliases'] = array_unique( $this->meta['aliases'] );
+        sort( $this->meta['aliases'] );
+
+        // recommended: set Hugo permalinks to match WordPress for consistent links
+        // but you can set an explicit URL here, if needed
+        // $this->meta['url'] = $wp_url;
 
         // capture some old WordPress-specific details
         $this->meta['wordpress'] = array(
             'id' => $post->ID,
             'slug' => html_entity_decode( urldecode( $post->post_name ), ENT_QUOTES, 'UTF-8' ),
             'guid' => html_entity_decode( urldecode( $post->guid ), ENT_QUOTES, 'UTF-8' ),
+            'url' => html_entity_decode( urldecode( get_permalink( $post )), ENT_QUOTES, 'UTF-8' ),
         );
 
         if ( $post->post_status == 'private' )
         {
             // hugo doesn't have the concept 'private posts' - this is just to
             // disambiguate between private posts and drafts
-            $this->meta['wordpress']['private'] = true;
+            $this->meta['wordpress']['private'] = TRUE;
         }
 
         //convert traditional post_meta values, hide hidden values
@@ -363,7 +371,7 @@ class Hugo_Export
                 $wp_filesystem->copy( $source_dir . $url_stripped_amps, $dirpath . $filename );
 
                 // write the list of page resources
-                $this->page_resources[] = array(
+                $this->page_resources[ $filename ] = array(
                     'src' => $filename,
                 );
 
@@ -385,7 +393,7 @@ class Hugo_Export
                 $wp_filesystem->put_contents( $dirpath . $filename, $get['body'] );
 
                 // write the list of page resources
-                $this->page_resources[] = array(
+                $this->page_resources[ $filename ] = array(
                     'src' => $filename,
                 );
 
@@ -414,7 +422,7 @@ class Hugo_Export
                         $wp_filesystem->put_contents( $dirpath . $filename, $get['body'] );
 
                         // write the list of page resources
-                        $this->page_resources[] = array(
+                        $this->page_resources[ $filename ] = array(
                             'src' => $filename,
                         );
 
@@ -454,6 +462,13 @@ class Hugo_Export
 
         global $wp_filesystem;
 
+        // check if we have a post thumbnail
+        $thumbnail_id = 0;
+        if ( has_post_thumbnail( $post ))
+        {
+            $thumbnail_id = get_post_thumbnail_id( $post->ID );
+        }
+
         $children = get_children( array(
         	'post_parent' => $postID,
         	'post_type'   => 'attachment',
@@ -462,13 +477,6 @@ class Hugo_Export
         ));
 
         $imported_attachments = array();
-
-        // check if we have a post thumbnail
-        $thumbnail_id = 0;
-        if ( has_post_thumbnail( $post ))
-        {
-            $thumbnail_id = get_post_thumbnail_id( $post->ID );
-        }
 
         foreach ( $children as $child )
         {
@@ -479,17 +487,8 @@ class Hugo_Export
             // copy the file
             $wp_filesystem->copy( $source, $dirpath . $filename );
 
-            // backwards compatibility with old themes
-            // and until I get an answer on https://discourse.gohugo.io/t/access-page-bundle-resources-from-a-list-page/14335
-            if ( $thumbnail_id == $child->ID )
-            {
-                $static_filename = 'thumbnail-' . basename( $dirpath ) . '.' . pathinfo( $filename, PATHINFO_EXTENSION );
-                $wp_filesystem->copy( $source, $this->dir . 'static/' . $static_filename );
-                $this->meta['thumbnail'] = '/' . $static_filename;
-            }
-
             // write the list of page resources
-            $this->page_resources[] = array(
+            $this->page_resources[ $filename ] = array(
                 'src' => $filename,
                 'name' => $thumbnail_id == $child->ID ? 'thumbnail' : $filename,
                 'title' => html_entity_decode( get_the_title( $child->ID )),
@@ -508,7 +507,7 @@ class Hugo_Export
 
         $content = apply_filters( 'the_content', $post->post_content );
         $content = html_entity_decode( $content, ENT_QUOTES | ENT_XML1, 'UTF-8');
-        
+
         // additional filters
         // remove bSuite/bCMS innerindex blocks
         $content = preg_replace( '/<div class="contents innerindex">.*?<\/div>/is', '', $content );
@@ -569,7 +568,7 @@ class Hugo_Export
         $this->write($output, $dirpath . 'comments.md');
 
         // add the imported comments page to the list of page resources
-        $this->page_resources[] = array(
+        $this->page_resources['comments.md'] = array(
             'src' => 'comments.md',
         );
 
@@ -628,7 +627,7 @@ class Hugo_Export
 
             // add all the page bundle resources to the meta
             // assignment is done here so that it's at the end of the meta
-            $this->meta['resources'] = $this->page_resources; 
+            $this->meta['resources'] = array_values( $this->page_resources );
 
             // format the front matter
             $frontmatter = Spyc::YAMLDump( $this->meta, false, 0 );
@@ -946,7 +945,7 @@ class Hugo_Export
 	 *
 	 * wp-includes/formatting.php#L531 is unfortunately completely inappropriate.
 	 * Modified version of Heiko Rabe’s code.
-	 * 
+	 *
 	 * @author Heiko Rabe http://code-styling.de
 	 * @link   http://www.code-styling.de/?p=574
 	 * @param  string $str
