@@ -36,7 +36,6 @@ class Hugo_Export
      *
      * @var bool
      */
-    // set TRUE by Casey
     private $include_comments = TRUE; //export comments as part of the posts they're associated with
 
     public $rename_options = array('site', 'blog'); //strings to strip from option keys on export
@@ -130,61 +129,80 @@ class Hugo_Export
     /**
      * Convert a posts meta data (both post_meta and the fields in wp_posts) to key value pairs for export
      */
-    function convert_meta(WP_Post $post)
+    function convert_meta( WP_Post $post )
     {
-        $output = array(
-            'title' => html_entity_decode(get_the_title($post), ENT_QUOTES | ENT_XML1, 'UTF-8'),
-            'slug' => $post->post_name,
-            'author' => get_userdata($post->post_author)->display_name,
-            'type' => get_post_type($post),
-            'date' => $this->_getPostDateAsIso($post),
-        );
-        if (false === empty($post->post_excerpt)) {
-            $output['excerpt'] = $post->post_excerpt;
+        $this->meta['title'] = html_entity_decode( get_the_title( $post ), ENT_QUOTES | ENT_XML1, 'UTF-8' );
+        $this->meta['author'] = get_userdata($post->post_author)->display_name;
+        $this->meta['type'] = get_post_type($post);
+        $this->meta['date'] = $this->_getPostDateAsIso($post);
+
+        $this->meta['excerpt'] = html_entity_decode( get_the_excerpt( $post ), ENT_QUOTES | ENT_XML1, 'UTF-8' );
+
+        if ( in_array( $post->post_status, array( 'draft', 'private' )))
+        {
+            // Mark private posts as drafts as well, so they don't get inadvertently published.
+            $this->meta['draft'] = true;
         }
 
-        if (in_array($post->post_status, array('draft', 'private'))) {
-            // Mark private posts as drafts as well, so they don't get
-            // inadvertently published.
-            $output['draft'] = true;
-        }
-        if ($post->post_status == 'private') {
-            // hugo doesn't have the concept 'private posts' - this is just to
-            // disambiguate between private posts and drafts.
-            $output['private'] = true;
-        }
+        // Ideally we'd set Hugo permalinks to match WordPress for consistent links
+        // but https://github.com/gohugoio/hugo/issues/4870 requires we set an explicit URL
+        $this->meta['url'] = html_entity_decode( urldecode( str_replace( home_url(), '', get_permalink( $post ))), ENT_QUOTES, 'UTF-8' );
 
         // add URL aliases for the content
         // https://gohugo.io/content-management/urls/
-        $output['aliases'] = array(
-            urldecode( str_replace( home_url(), '', get_permalink( $post ))),
-            '/?p=' . $post->ID,
-        );
-        if ('page' == $post->post_type)
+        $old_url_base = dirname( $this->meta['url'] );
+        foreach ( get_post_meta( $post->ID, '_wp_old_slug' ) as $old_slug )
         {
-            $output['aliases'] = '/?page_id=' . $post->ID;
+            if ( empty( $old_slug ) )
+            {
+                continue;
+            }
+
+            $this->meta['aliases'][] = $old_url_base . '/' . urldecode( $old_slug );
+            $this->meta['aliases'][] = $old_url_base . '/' . html_entity_decode( urldecode( $old_slug ), ENT_QUOTES, 'UTF-8' );
+            $this->meta['aliases'][] = $old_url_base . '/' . $this->translit( html_entity_decode( urldecode( $old_slug ), ENT_QUOTES, 'UTF-8' ));
         }
-        $output['aliases'] = array_unique( $output['aliases'] );
 
-        $output['wp_guid'] = urldecode( $post->guid );
+        // appropriate for some permalink patterns
+        // enable/disable as needed
+        if ( '/' != $old_url_base )
+        {
+            $this->meta['aliases'][] = $old_url_base;
+        }
 
+        // check if the old WP slug had non-ascii chars
+        // this makes assumptions about URL structure that might not work for everybody
+        $wp_slug = html_entity_decode( urldecode( $post->post_name ), ENT_QUOTES, 'UTF-8' );
+        $sanized_slug = $this->translit( html_entity_decode( urldecode( $post->post_name ), ENT_QUOTES, 'UTF-8' ));
+        if ( $sanized_slug != $wp_slug )
+        {
+            $this->meta['aliases'][] = $this->meta['url'];
+            $this->meta['url'] = str_replace( $wp_slug, $sanized_slug, $this->meta['url'] );
+        }
 
-        //turns permalink into 'url' format, since Hugo supports redirection on per-post basis
-//        $output['url'] = urldecode(str_replace(home_url(), '', get_permalink($post)));
+        // capture some old WordPress-specific details
+        $this->meta['wordpress'] = array(
+            'id' => $post->ID,
+            'slug' => html_entity_decode( urldecode( $post->post_name ), ENT_QUOTES, 'UTF-8' ),
+            'guid' => html_entity_decode( urldecode( $post->guid ), ENT_QUOTES, 'UTF-8' ),
+        );
 
-        // check if the post or page has a Featured Image assigned to it.
-        if (has_post_thumbnail($post)) {
-            //$output['featured_image'] = str_replace(get_site_url(), "", get_the_post_thumbnail_url($post));
-            // added by Casey to get the original item
-            $output['featured_image'] = str_replace(get_site_url(), "", wp_get_attachment_url( get_post_thumbnail_id( $post->ID )));
+        if ( $post->post_status == 'private' )
+        {
+            // hugo doesn't have the concept 'private posts' - this is just to
+            // disambiguate between private posts and drafts
+            $this->meta['wordpress']['private'] = true;
         }
 
         //convert traditional post_meta values, hide hidden values
-        foreach (get_post_custom($post->ID) as $key => $value) {
-            if (substr($key, 0, 1) == '_') {
+        foreach (get_post_custom($post->ID) as $key => $value)
+        {
+            if ( substr( $key, 0, 1 ) == '_')
+            {
                 continue;
             }
-            // exclusions added by Casey
+
+            // exclude some meta keys
             if ( in_array( $key, array(
                 'mct_proposed_tags',
                 'go_oc_settings',
@@ -194,11 +212,12 @@ class Hugo_Export
             ))) {
                 continue;
             }
-            if (false === $this->_isEmpty($value)) {
-                $output[$key] = $value;
+
+            if ( FALSE === $this->_isEmpty( $value ))
+            {
+                $this->meta[ $key ] = $value;
             }
         }
-        return $output;
     }
 
     protected function _isEmpty($value)
@@ -211,13 +230,6 @@ class Hugo_Export
                 return true;
             }
             return false;
-//            $isEmpty=true;
-//            foreach($value as $k=>$v){
-//                if(true === empty($v)){
-//                    $isEmpty
-//                }
-//            }
-//            return $isEmpty;
         }
         return true === empty($value);
     }
@@ -227,14 +239,13 @@ class Hugo_Export
      */
     function convert_terms($post)
     {
-
-        $output = array();
-        foreach (get_taxonomies(array('object_type' => array(get_post_type($post)))) as $tax) {
-
-            $terms = wp_get_post_terms($post, $tax);
+        foreach ( get_taxonomies() as $tax )
+        {
+            $terms = wp_get_post_terms( $post, $tax );
 
             //convert tax name for Hugo
-            switch ($tax) {
+            switch ( $tax )
+            {
                 case 'post_tag':
                     $tax = 'tags';
                     break;
@@ -243,14 +254,15 @@ class Hugo_Export
                     break;
             }
 
-            if ($tax == 'post_format') {
-                $output['format'] = get_post_format($post);
-            } else {
-                $output[$tax] = wp_list_pluck($terms, 'name');
+            if ( $tax == 'post_format' )
+            {
+                $this->meta['wordpress']['format'] = get_post_format( $post );
+            }
+            else
+            {
+                $this->meta[ $tax ] = wp_list_pluck( $terms, 'name' );
             }
         }
-
-        return $output;
     }
 
     /**
@@ -294,17 +306,28 @@ class Hugo_Export
         $source_dir = dirname( $source_dir['basedir'] );
 
         $media_extensions = array(
-            'jpg',
-            'jpeg',
             'gif',
+            'jpeg',
+            'jpg',
             'png',
-            'pdf',
+            'svg',
 
-            'mp3',
             'm4a',
+            'mp3',
             'oga',
 
+            'm4v',
             'mov',
+            'mp4',
+            'mpeg',
+            'mpg',
+            'swf',
+            'wmv',
+
+            'pdf',
+            'ppt',
+            'xls',
+            'zip',
         );
 
         $imported_media = $recovered_media = $lost_media = array();
@@ -323,6 +346,13 @@ class Hugo_Export
                 continue;
             }
 
+            // get the filename for this link and skip any items we handled when copying attachments earlier
+            $filename = pathinfo( $url_stripped_amps, PATHINFO_BASENAME );
+            if ( isset( $this->imported_media[ $filename ] ))
+            {
+                continue;
+            }
+
             // try to process local links on the filesystem
             if ( FALSE !== strpos( $url_stripped_amps, get_site_url( NULL, '', parse_url( $url_stripped_amps,  PHP_URL_SCHEME ))))
             {
@@ -330,11 +360,16 @@ class Hugo_Export
                 $url_stripped_amps = str_replace( get_site_url( NULL, '', parse_url ( $url_stripped_amps,  PHP_URL_SCHEME )), '', $url_stripped_amps );
 
                 // copy the file
-                $filename = pathinfo( $url_stripped_amps, PATHINFO_BASENAME );
                 $wp_filesystem->copy( $source_dir . $url_stripped_amps, $dirpath . $filename );
 
+                // write the list of page resources
+                $this->page_resources[] = array(
+                    'src' => $filename,
+                );
+
                 // record meta, then move on to the next URL (no further processing here)
-                $imported_media[ $filename ] = $url;
+                // record a list for accounting, and a separate list for rewriting the links in the post content later
+                $imported_media[ $filename ]= $this->imported_media[ $filename ] = $url;
                 continue;
             }
 
@@ -349,8 +384,14 @@ class Hugo_Export
                 // write the returned body to the file
                 $wp_filesystem->put_contents( $dirpath . $filename, $get['body'] );
 
+                // write the list of page resources
+                $this->page_resources[] = array(
+                    'src' => $filename,
+                );
+
                 // record meta, then move on to the next URL (no further processing here)
-                $imported_media[ $filename ] = $url;
+                // record a list for accounting, and a separate list for rewriting the links in the post content later
+                $imported_media[ $filename ]= $this->imported_media[ $filename ] = $url;
                 continue;
             }
 
@@ -365,7 +406,6 @@ class Hugo_Export
                 if ( isset( $archive_deets->archived_snapshots->closest->url ))
                 {
                     $archive_url =  str_replace( '/http', 'if_/http', $archive_deets->archived_snapshots->closest->url );
-fwrite(STDOUT, print_r( $archive_url, TRUE ) . "\n\n" );
 
                     $get = wp_remote_post( $archive_url );
                     if ( is_array( $get ) && 200 == $get['response']['code'] )
@@ -373,8 +413,14 @@ fwrite(STDOUT, print_r( $archive_url, TRUE ) . "\n\n" );
                         // write the returned body to the file
                         $wp_filesystem->put_contents( $dirpath . $filename, $get['body'] );
 
+                        // write the list of page resources
+                        $this->page_resources[] = array(
+                            'src' => $filename,
+                        );
+
                         // record meta, then move on to the next URL (no further processing here)
-                        $recovered_media[ $filename ] = $url;
+                        // record a list for accounting, and a separate list for rewriting the links in the post content later
+                        $recovered_media[ $filename ]= $this->imported_media[ $filename ] = $url;
                         continue;
                     }
                 }
@@ -386,11 +432,18 @@ fwrite(STDOUT, print_r( $archive_url, TRUE ) . "\n\n" );
             $lost_media[ $filename ] = $url;
         }
 
-        return array(
-            'imported-media' => $imported_media,
-            'recovered-media' => $recovered_media,
-            'lost-media' => $lost_media,
-        );
+        if ( ! empty( $imported_media ))
+        {
+            $this->meta['imported_media']['imported'] = $imported_media;
+        }
+        if ( ! empty( $recovered_media ))
+        {
+            $this->meta['imported_media']['imported'] = $recovered_media;
+        }
+        if ( ! empty( $lost_media ))
+        {
+            $this->meta['imported_media']['imported'] = $lost_media;
+        }
     }
 
     /**
@@ -409,18 +462,42 @@ fwrite(STDOUT, print_r( $archive_url, TRUE ) . "\n\n" );
         ));
 
         $imported_attachments = array();
+
+        // check if we have a post thumbnail
+        $thumbnail_id = 0;
+        if ( has_post_thumbnail( $post ))
+        {
+            $thumbnail_id = get_post_thumbnail_id( $post->ID );
+        }
+
         foreach ( $children as $child )
         {
             $source_url = wp_get_attachment_url( $child->ID );
             $source = get_attached_file( $child->ID );
-            $filename = pathinfo( $source, PATHINFO_BASENAME );
+            $filename = $this->translit( html_entity_decode( urldecode( pathinfo( $source, PATHINFO_BASENAME )), ENT_QUOTES, 'UTF-8' ));
 
+            // copy the file
             $wp_filesystem->copy( $source, $dirpath . $filename );
 
-            $imported_attachments[ $filename ] = $source_url;
-        }
+            // backwards compatibility with old themes
+            // and until I get an answer on https://discourse.gohugo.io/t/access-page-bundle-resources-from-a-list-page/14335
+            if ( $thumbnail_id == $child->ID )
+            {
+                $static_filename = 'thumbnail-' . basename( $dirpath ) . '.' . pathinfo( $filename, PATHINFO_EXTENSION );
+                $wp_filesystem->copy( $source, $this->dir . 'static/' . $static_filename );
+                $this->meta['thumbnail'] = '/' . $static_filename;
+            }
 
-        return array( 'imported-attachments' => $imported_attachments );
+            // write the list of page resources
+            $this->page_resources[] = array(
+                'src' => $filename,
+                'name' => $thumbnail_id == $child->ID ? 'thumbnail' : $filename,
+                'title' => html_entity_decode( get_the_title( $child->ID )),
+            );
+
+            // record the imported media in the WP meta, and to a separate list for rewriting the links in the post content later
+            $this->meta['wordpress']['attachments'][ $filename ] = $this->imported_media[ $filename ] = $source_url;
+        }
     }
 
     /**
@@ -429,12 +506,14 @@ fwrite(STDOUT, print_r( $archive_url, TRUE ) . "\n\n" );
     function convert_content($post)
     {
 
-        $content = apply_filters('the_content', $post->post_content);
-
+        $content = apply_filters( 'the_content', $post->post_content );
+        $content = html_entity_decode( $content, ENT_QUOTES | ENT_XML1, 'UTF-8');
+        
         // additional filters
         // remove bSuite/bCMS innerindex blocks
         $content = preg_replace( '/<div class="contents innerindex">.*?<\/div>/is', '', $content );
 
+        // convert to markdownx
         $converter = new Markdownify\ConverterExtra;
         $markdown = $converter->parseString($content);
 
@@ -454,7 +533,7 @@ fwrite(STDOUT, print_r( $archive_url, TRUE ) . "\n\n" );
         $args = array(
             'post_id' => $post->ID,
             'order' => 'ASC',   // oldest comments first
-            'type' => 'comment'
+            'type' => 'comment' // we don't want pingbacks etc.
         );
         $comments = get_comments($args);
         if (empty($comments)) {
@@ -462,8 +541,8 @@ fwrite(STDOUT, print_r( $archive_url, TRUE ) . "\n\n" );
         }
 
         $meta = array(
-            'title' => 'Comments on ' . html_entity_decode(get_the_title($post), ENT_QUOTES | ENT_XML1, 'UTF-8'),
-            'date' => $this->_getPostDateAsIso($post),
+            'title' => 'Comments on ' . html_entity_decode( get_the_title( $post ), ENT_QUOTES | ENT_XML1, 'UTF-8' ),
+            'date' => $this->_getPostDateAsIso( $post ),
         );
 
         $converter = new Markdownify\ConverterExtra;
@@ -489,6 +568,11 @@ fwrite(STDOUT, print_r( $archive_url, TRUE ) . "\n\n" );
         // write out the comments as a separate file
         $this->write($output, $dirpath . 'comments.md');
 
+        // add the imported comments page to the list of page resources
+        $this->page_resources[] = array(
+            'src' => 'comments.md',
+        );
+
         // return empty because we're writing the comments out as a separate file
         return '';
     }
@@ -508,33 +592,48 @@ fwrite(STDOUT, print_r( $archive_url, TRUE ) . "\n\n" );
         foreach ($this->get_posts() as $postID) {
             $post = get_post($postID);
             setup_postdata($post);
+            $this->meta = array();
+            $this->page_resources = array();
+            $this->imported_media = array();
 
             $dirpath = $this->make_dest_dir($post);
 
-            // get all post meta, terms, and other bits as a single array
-            $meta = array_merge(
-                $this->convert_meta($post),
-                $this->convert_terms($postID),
-                $this->convert_attachments($postID, $dirpath),
-                $this->convert_linked_media($post, $dirpath)
-            );
+            // get all post meta, terms, and other bits as a single array in $this->meta
+            $this->convert_meta( $post );
+            $this->convert_terms( $postID );
+            $this->convert_attachments( $postID, $dirpath );
+            $this->convert_linked_media( $post, $dirpath );
 
-            // remove falsy values, which just add clutter
-            foreach ($meta as $key => $value) {
-                if (!is_numeric($value) && !$value) {
-                    unset($meta[$key]);
+            // convert the post content and comments
+            $content = "\n---\n" . $this->convert_content($post);
+            if ( $this->include_comments )
+            {
+                $content .= $this->convert_comments( $post, $dirpath );
+            }
+
+            // rewrite links to media that has been converted in previous steps
+            foreach ( $this->imported_media as $file => $url )
+            {
+                $content = str_replace( $url, $file, $content );
+            }
+
+            // remove falsy values from the meta
+            foreach ( $this->meta as $key => $value )
+            {
+                if ( ! is_numeric( $value ) && ! $value )
+                {
+                    unset( $this->meta[ $key ] );
                 }
             }
 
-            // Hugo doesn't like word-wrapped permalinks
-            $output = Spyc::YAMLDump($meta, false, 0);
+            // add all the page bundle resources to the meta
+            // assignment is done here so that it's at the end of the meta
+            $this->meta['resources'] = $this->page_resources; 
 
-            $output .= "\n---\n";
-            $output .= $this->convert_content($post);
-            if ($this->include_comments) {
-                $output .= $this->convert_comments($post, $dirpath);
-            }
-            $this->write($output, $dirpath . 'index.md');
+            // format the front matter
+            $frontmatter = Spyc::YAMLDump( $this->meta, false, 0 );
+
+            $this->write( $frontmatter . $content, $dirpath . 'index.md' );
 
             // write progress to the CLI
             fwrite(STDOUT, '.' );
@@ -582,7 +681,7 @@ fwrite(STDOUT, print_r( $archive_url, TRUE ) . "\n\n" );
         $this->zip = $this->getTempDir() . 'wp-hugo.zip';
         $wp_filesystem->mkdir($this->dir);
         $wp_filesystem->mkdir($this->dir . $this->post_folder);
-        $wp_filesystem->mkdir($this->dir . 'wp-content/');
+        $wp_filesystem->mkdir($this->dir . 'static/');
 
         $this->convert_options();
         $this->convert_posts();
@@ -637,15 +736,20 @@ fwrite(STDOUT, print_r( $archive_url, TRUE ) . "\n\n" );
     /**
      * Write file to temp dir
      */
-    function make_dest_dir($post)
+    function make_dest_dir( $post )
     {
+        // decode the post name and transliterate any funky characters that WP didn't strip
+        $post_name = $this->translit( html_entity_decode( urldecode( $post->post_name ), ENT_QUOTES, 'UTF-8' ));
 
         global $wp_filesystem;
 
-        if (get_post_type($post) == 'page') {
-            $dirpath = urldecode($this->dir . $post->post_name . '/');
-        } else {
-            $dirpath = $this->dir . $this->post_folder . date('Y-m-d', strtotime($post->post_date)) . '-' . urldecode($post->post_name . '/');
+        if ( get_post_type( $post ) == 'page')
+        {
+            $dirpath = $this->dir . $post_name . '/';
+        }
+        else
+        {
+            $dirpath = $this->dir . $this->post_folder . date( 'Y-m-d', strtotime( $post->post_date )) . '-' . $post_name . '/';
         }
 
         $wp_filesystem->mkdir( $dirpath );
@@ -834,6 +938,231 @@ fwrite(STDOUT, print_r( $archive_url, TRUE ) . "\n\n" );
         }
         return $this->_tempDir;
     }
+
+	/**
+	 * Replaces non ASCII chars.
+	 *
+	 * Stolen from https://github.com/thefuxia/Germanix-WordPress-Plugin/blob/master/germanix_url.php
+	 *
+	 * wp-includes/formatting.php#L531 is unfortunately completely inappropriate.
+	 * Modified version of Heiko Rabe’s code.
+	 * 
+	 * @author Heiko Rabe http://code-styling.de
+	 * @link   http://www.code-styling.de/?p=574
+	 * @param  string $str
+	 * @return string
+	 */
+	function translit( $str )
+	{
+		$utf8 = array (
+				'Ä' => 'Ae'
+			,	'ä' => 'ae'
+			,	'Æ' => 'Ae'
+			,	'æ' => 'ae'
+			,	'À' => 'A'
+			,	'à' => 'a'
+			,	'Á' => 'A'
+			,	'á' => 'a'
+			,	'Â' => 'A'
+			,	'â' => 'a'
+			,	'Ã' => 'A'
+			,	'ã' => 'a'
+			,	'Å' => 'A'
+			,	'å' => 'a'
+			,	'ª' => 'a'
+			,	'ₐ' => 'a'
+			,	'ā' => 'a'
+			,	'Ć' => 'C'
+			,	'ć' => 'c'
+			,	'Ç' => 'C'
+			,	'ç' => 'c'
+			,	'Ð' => 'D'
+			,	'đ' => 'd'
+			,	'È' => 'E'
+			,	'è' => 'e'
+			,	'É' => 'E'
+			,	'é' => 'e'
+			,	'Ê' => 'E'
+			,	'ê' => 'e'
+			,	'Ë' => 'E'
+			,	'ë' => 'e'
+			,	'ₑ' => 'e'
+			,	'ƒ' => 'f'
+			,	'ğ' => 'g'
+			,	'Ğ' => 'G'
+			,	'Ì' => 'I'
+			,	'ì' => 'i'
+			,	'Í' => 'I'
+			,	'í' => 'i'
+			,	'Î' => 'I'
+			,	'î' => 'i'
+			,	'Ï' => 'Ii'
+			,	'ï' => 'ii'
+			,	'ī' => 'i'
+			,	'ı' => 'i'
+			,	'I' => 'I' // turkish, correct?
+			,	'Ñ' => 'N'
+			,	'ñ' => 'n'
+			,	'ⁿ' => 'n'
+			,	'Ò' => 'O'
+			,	'ò' => 'o'
+			,	'Ó' => 'O'
+			,	'ó' => 'o'
+			,	'Ô' => 'O'
+			,	'ô' => 'o'
+			,	'Õ' => 'O'
+			,	'õ' => 'o'
+			,	'Ø' => 'O'
+			,	'ø' => 'o'
+			,	'ₒ' => 'o'
+			,	'Ö' => 'Oe'
+			,	'ö' => 'oe'
+			,	'Œ' => 'Oe'
+			,	'œ' => 'oe'
+			,	'ß' => 'ss'
+			,	'Š' => 'S'
+			,	'š' => 's'
+			,	'ş' => 's'
+			,	'Ş' => 'S'
+			,	'™' => 'TM'
+			,	'Ù' => 'U'
+			,	'ù' => 'u'
+			,	'Ú' => 'U'
+			,	'ú' => 'u'
+			,	'Û' => 'U'
+			,	'û' => 'u'
+			,	'Ü' => 'Ue'
+			,	'ü' => 'ue'
+			,	'Ý' => 'Y'
+			,	'ý' => 'y'
+			,	'ÿ' => 'y'
+			,	'Ž' => 'Z'
+			,	'ž' => 'z'
+			// misc
+			,	'¢' => 'Cent'
+			,	'€' => 'Euro'
+			,	'‰' => 'promille'
+			,	'№' => 'Nr'
+			,	'$' => 'Dollar'
+			,	'℃' => 'Grad Celsius'
+			,	'°C' => 'Grad Celsius'
+			,	'℉' => 'Grad Fahrenheit'
+			,	'°F' => 'Grad Fahrenheit'
+			// Superscripts
+			,	'⁰' => '0'
+			,	'¹' => '1'
+			,	'²' => '2'
+			,	'³' => '3'
+			,	'⁴' => '4'
+			,	'⁵' => '5'
+			,	'⁶' => '6'
+			,	'⁷' => '7'
+			,	'⁸' => '8'
+			,	'⁹' => '9'
+			// Subscripts
+			,	'₀' => '0'
+			,	'₁' => '1'
+			,	'₂' => '2'
+			,	'₃' => '3'
+			,	'₄' => '4'
+			,	'₅' => '5'
+			,	'₆' => '6'
+			,	'₇' => '7'
+			,	'₈' => '8'
+			,	'₉' => '9'
+			// Operators, punctuation
+			,	'±' => 'plusminus'
+			,	'×' => 'x'
+			,	'₊' => 'plus'
+			,	'₌' => '='
+			,	'⁼' => '='
+			,	'⁻' => '-'    // sup minus
+			,	'₋' => '-'    // sub minus
+			,	'–' => '-'    // ndash
+			,	'—' => '-'    // mdash
+			,	'‑' => '-'    // non breaking hyphen
+			,	'․' => '.'    // one dot leader
+			,	'‥' => '..'  // two dot leader
+			,	'…' => '...'  // ellipsis
+			,	'‧' => '.'    // hyphenation point
+			,	' ' => '-'   // nobreak space
+			,	' ' => '-'   // normal space
+			// Russian
+			,	'А' => 'A'
+			,	'Б' => 'B'
+			,	'В' => 'V'
+			,	'Г' => 'G'
+			,	'Д' => 'D'
+			,	'Е' => 'E'
+			,	'Ё' => 'YO'
+			,	'Ж' => 'ZH'
+			,	'З' => 'Z'
+			,	'И' => 'I'
+			,	'Й' => 'Y'
+			,	'К' => 'K'
+			,	'Л' => 'L'
+			,	'М' => 'M'
+			,	'Н' => 'N'
+			,	'О' => 'O'
+			,	'П' => 'P'
+			,	'Р' => 'R'
+			,	'С' => 'S'
+			,	'Т' => 'T'
+			,	'У' => 'U'
+			,	'Ф' => 'F'
+			,	'Х' => 'H'
+			,	'Ц' => 'TS'
+			,	'Ч' => 'CH'
+			,	'Ш' => 'SH'
+			,	'Щ' => 'SCH'
+			,	'Ъ' => ''
+			,	'Ы' => 'YI'
+			,	'Ь' => ''
+			,	'Э' => 'E'
+			,	'Ю' => 'YU'
+			,	'Я' => 'YA'
+			,	'а' => 'a'
+			,	'б' => 'b'
+			,	'в' => 'v'
+			,	'г' => 'g'
+			,	'д' => 'd'
+			,	'е' => 'e'
+			,	'ё' => 'yo'
+			,	'ж' => 'zh'
+			,	'з' => 'z'
+			,	'и' => 'i'
+			,	'й' => 'y'
+			,	'к' => 'k'
+			,	'л' => 'l'
+			,	'м' => 'm'
+			,	'н' => 'n'
+			,	'о' => 'o'
+			,	'п' => 'p'
+			,	'р' => 'r'
+			,	'с' => 's'
+			,	'т' => 't'
+			,	'у' => 'u'
+			,	'ф' => 'f'
+			,	'х' => 'h'
+			,	'ц' => 'ts'
+			,	'ч' => 'ch'
+			,	'ш' => 'sh'
+			,	'щ' => 'sch'
+			,	'ъ' => ''
+			,	'ы' => 'yi'
+			,	'ь' => ''
+			,	'э' => 'e'
+			,	'ю' => 'yu'
+			,	'я' => 'ya'
+		);
+		$str = strtr( $str, $utf8 );
+
+        // eliminate repeated chars (especially repeated '-')
+		$str = preg_replace( '~([=+.-])\\1+~', "\\1", $str );
+
+        // eliminate leading or trailing '-'
+		return trim( $str, '-' );
+	}
 }
 
 global $je;
