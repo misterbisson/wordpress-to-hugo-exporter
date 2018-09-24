@@ -99,7 +99,7 @@ class Hugo_Export
 
 // @TODO: need to handle post_type=scrib-authority
         global $wpdb;
-        return $wpdb->get_col("SELECT ID FROM $wpdb->posts WHERE post_status in ('publish', 'draft', 'private') AND post_type IN ('post', 'page' )");
+        return $wpdb->get_col("SELECT ID FROM $wpdb->posts WHERE post_status in ('publish', 'draft', 'private') AND post_type IN ('post', 'page' ) ORDER BY post_modified_gmt DESC");
     }
 
     /**
@@ -212,12 +212,17 @@ class Hugo_Export
 
             // exclude some meta keys
             if ( in_array( $key, array(
+                'oc_metadata',
+                'oc_commit_id',
                 'mct_proposed_tags',
                 'go_oc_settings',
                 'bgeo',
                 'go-opencalais',
                 'yourls_shorturl',
-            ))) {
+                'yourls_fetching',
+                'syntaxhighlighter_encoded',
+            )))
+            {
                 continue;
             }
 
@@ -343,7 +348,7 @@ class Hugo_Export
         {
 
             // WordPress encodes ampersands; they need decoding
-            $url_stripped_amps = str_replace( '&amp;', '&', $url );
+            $url_stripped_amps = urldecode( $url );
 
             // ignore links that don't appear to be media
             if ( ! in_array(
@@ -369,6 +374,27 @@ class Hugo_Export
 
                 // copy the file
                 $wp_filesystem->copy( $source_dir . $url_stripped_amps, $dirpath . $filename );
+
+                // write the list of page resources
+                $this->page_resources[ $filename ] = array(
+                    'src' => $filename,
+                );
+
+                // record meta, then move on to the next URL (no further processing here)
+                // record a list for accounting, and a separate list for rewriting the links in the post content later
+                $imported_media[ $filename ]= $this->imported_media[ $filename ] = $url;
+                continue;
+            }
+
+            // try to process old oz.plymouth.edu links with a custom import
+            // http://oz.plymouth.edu/~cbisson/gfx/Dumbkins/squirreldacanter.jpg
+            if ( FALSE !== strpos( $url_stripped_amps, 'oz.plymouth.edu/~cbisson' ))
+            {
+                // get the relative URL
+                $url_stripped_amps = str_replace( 'http://oz.plymouth.edu/~cbisson', '', $url_stripped_amps );
+
+                // copy the file
+                $wp_filesystem->copy( '/home/bisson/Home/' . $url_stripped_amps, $dirpath . $filename );
 
                 // write the list of page resources
                 $this->page_resources[ $filename ] = array(
@@ -446,11 +472,11 @@ class Hugo_Export
         }
         if ( ! empty( $recovered_media ))
         {
-            $this->meta['imported_media']['imported'] = $recovered_media;
+            $this->meta['imported_media']['recovered'] = $recovered_media;
         }
         if ( ! empty( $lost_media ))
         {
-            $this->meta['imported_media']['imported'] = $lost_media;
+            $this->meta['imported_media']['lost'] = $lost_media;
         }
     }
 
@@ -502,7 +528,7 @@ class Hugo_Export
     /**
      * Convert the main post content to Markdown.
      */
-    function convert_content( $post )
+    function convert_content( $post, $dirpath )
     {
 
         $content = apply_filters( 'the_content', $post->post_content );
@@ -559,17 +585,20 @@ class Hugo_Export
                 'url' => esc_url( $comment->comment_author_url ),
                 'date_gmt' => date('c', strtotime( $comment->comment_date_gmt )),
             );
-            $content = $meta['comments'][ $comment->comment_ID ]['text'] = $converter->parseString( get_comment_text( $comment->comment_ID ));
-            $comment_text .= "\n\n\n### Comment by " . $comment->comment_author . " on " . get_comment_date("Y-m-d H:i:s O", $comment) . "\n\n";
+            $content = $converter->parseString( wpautop( get_comment_text( $comment->comment_ID )));
+            $comment_text .= "\n\n\n### Comment by " . $comment->comment_author . " on " . get_comment_date( "Y-m-d H:i:s O", $comment ) . "\n\n";
             $comment_text .= $content;
         }
 
-        // Hugo doesn't like word-wrapped permalinks
-        $output = Spyc::YAMLDump($meta, false, 0);
+        // convert the comment array to yaml-formatted front matter
+        // filter the content to make sure there are no unexpected control chars in it
+        $output = preg_replace( '/[^\PC\s]/u', '', Spyc::YAMLDump( $meta, false, 0 ));
+
+        // add the comment text
         $output .= "\n---\n" . $comment_text;
 
         // write out the comments as a separate file
-        $this->write($output, $dirpath . 'comments.md');
+        $this->write( $output, $dirpath . 'comments.md' );
 
         // add the imported comments page to the list of page resources
         $this->page_resources['comments.md'] = array(
@@ -608,7 +637,7 @@ class Hugo_Export
             $this->convert_linked_media( $post, $dirpath );
 
             // convert the post content and comments
-            $content = "\n---\n" . $this->convert_content($post);
+            $content = "\n---\n" . $this->convert_content( $post, $dirpath );
             if ( $this->include_comments )
             {
                 $content .= $this->convert_comments( $post, $dirpath );
@@ -639,7 +668,7 @@ class Hugo_Export
             $this->write( $frontmatter . $content, $dirpath . 'index.md' );
 
             // write progress to the CLI
-            fwrite(STDOUT, '.' );
+            fwrite( STDOUT, '.' );
 
             sleep( 2 );
         }
@@ -754,7 +783,13 @@ class Hugo_Export
         }
         else
         {
-            $dirpath = $this->dir . $this->post_folder . date( 'Y-m-d', strtotime( $post->post_date )) . '-' . $post_name . '/';
+            $date_str = date( 'Y-m-d', strtotime( $post->post_date ));
+            if ( 'draft' == $post->post_status )
+            {
+                // override the post date for drafts
+                $date_str = date( 'Y-m-d', strtotime( $post->post_modified ));
+            }
+            $dirpath = $this->dir . $this->post_folder . $date_str . '-' . $post_name . '/';
         }
 
         $wp_filesystem->mkdir( $dirpath );
